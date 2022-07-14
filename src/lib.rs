@@ -23,7 +23,7 @@ use std::{
     fmt,
     marker::PhantomData,
     sync::Arc,
-    time::Instant,
+    time::{Instant, Duration},
 };
 use tempfile::tempfile;
 
@@ -134,13 +134,55 @@ impl<S: BlobStore + Clone> RadixTreeExt<S> for RadixTree<S> {
 
 type Block = libipld::Block<libipld::store::DefaultParams>;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoreStats {
+    count: u64,
+    size: u64,
+}
+
+impl StoreStats {
+    /// Total number of blocks in the store
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    /// Total size of blocks in the store
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+}
+
 fn get_links<E: Extend<Cid>>(cid: &Cid, data: &[u8], cids: &mut E) -> anyhow::Result<()> {
     let codec = <DefaultParams as StoreParams>::Codecs::try_from(cid.codec())?;
     codec.references::<Ipld, E>(data, cids)?;
     Ok(())
 }
 
+pub struct Transaction<'a, S> {
+    p: PhantomData<&'a S>,
+}
+
+impl<S> BlockStore<S> {
+
+    pub fn incremental_gc(&mut self, _min_blocks: usize, _target_duration: Duration) -> anyhow::Result<bool> {
+        todo!();
+    }
+
+    pub fn flush(&mut self) -> anyhow::Result<()> {
+        todo!();
+    }
+
+    pub fn get_store_stats(&self) -> anyhow::Result<StoreStats> {
+        todo!();
+    }
+
+    pub fn transaction(&mut self) -> Transaction<'_, S> {
+        todo!();
+    }
+}
+
 impl<S: StoreParams> BlockStore<S> {
+
     pub fn temp_pin(&mut self) -> TempPin {
         let mut temp_pins = self.temp_pins.lock();
         let id = temp_pins
