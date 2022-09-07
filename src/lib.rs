@@ -6,9 +6,9 @@
 use fnv::FnvHashSet;
 use libipld::{
     cbor::{DagCborCodec},
-    codec::Codec,
+    codec::{Codec, References},
     multihash::Code,
-    store::StoreParams,
+    store::{StoreParams, Store},
     Cid, DefaultParams, Ipld,
 };
 use log::info;
@@ -23,7 +23,7 @@ use std::{
     fmt,
     marker::PhantomData,
     sync::Arc,
-    time::{Instant, Duration},
+    time::{Instant, Duration}, borrow::Cow,
 };
 use tempfile::tempfile;
 
@@ -61,13 +61,6 @@ fn block_key(id: &Cid) -> Vec<u8> {
     res.extend_from_slice(BLOCK);
     id.write_bytes(&mut res).unwrap();
     res
-}
-
-#[derive(Debug)]
-pub struct BlockStore<S> {
-    root: RadixTree<DynBlobStore>,
-    temp_pins: Arc<Mutex<BTreeMap<u64, FnvHashSet<Cid>>>>,
-    p: PhantomData<S>,
 }
 
 /// a handle that contains a temporary pin
@@ -158,26 +151,138 @@ fn get_links<E: Extend<Cid>>(cid: &Cid, data: &[u8], cids: &mut E) -> anyhow::Re
     Ok(())
 }
 
-pub struct Transaction<'a, S> {
-    p: PhantomData<&'a S>,
+pub struct Transaction<'a, S>(&'a mut BlockStore<S>);
+
+impl<'a, S> Transaction<'a, S>
+where
+    S: StoreParams,
+    Ipld: References<S::Codecs>,
+{
+    pub(crate) fn new(owner: &'a mut BlockStore<S>) -> Self {
+        Self(owner)
+    }
+
+    /// Set or delete an alias
+    pub fn alias<'b>(
+        &mut self,
+        name: impl Into<Cow<'b, [u8]>>,
+        link: Option<&'b Cid>,
+    ) -> anyhow::Result<()> {
+        self.0.alias(name.into().as_ref(), link)
+    }
+
+    /// Returns the aliases referencing a cid.
+    pub fn reverse_alias(&mut self, cid: &Cid) -> anyhow::Result<Option<FnvHashSet<Vec<u8>>>> {
+        self.0.reverse_alias(cid)
+    }
+
+    /// Resolves an alias to a cid.
+    pub fn resolve<'b>(&mut self, name: impl Into<Cow<'b, [u8]>>) -> anyhow::Result<Option<Cid>> {
+        self.0.resolve(name.into().as_ref())
+    }
+
+    /// Get a temporary pin for safely adding blocks to the store
+    pub fn temp_pin(&mut self) -> TempPin {
+        self.0.temp_pin()
+    }
+
+    /// Extend temp pin with an additional cid
+    pub fn extend_temp_pin(&mut self, pin: &mut TempPin, link: &Cid) -> anyhow::Result<()> {
+        todo!()
+    }
+
+    /// Checks if the store knows about the cid.
+    ///
+    /// Note that this does not necessarily mean that the store has the data for the cid.
+    pub fn has_cid(&mut self, cid: &Cid) -> anyhow::Result<bool> {
+        self.0.has_block(cid)
+    }
+
+    /// Checks if the store has the data for a cid
+    pub fn has_block(&mut self, cid: &Cid) -> anyhow::Result<bool> {
+        self.0.has_block(cid)
+    }
+
+    /// Get all cids that the store knows about
+    pub fn get_known_cids<C: FromIterator<Cid>>(&mut self) -> anyhow::Result<C> {
+        self.0.cids().map(|x| x.into_iter().collect())
+    }
+
+    /// Get all cids for which the store has blocks
+    pub fn get_block_cids<C: FromIterator<Cid>>(&mut self) -> anyhow::Result<C> {
+        self.0.cids().map(|x| x.into_iter().collect())
+    }
+
+    /// Get descendants of a cid
+    pub fn get_descendants<C: FromIterator<Cid>>(&mut self, cid: &Cid) -> anyhow::Result<C> {
+        let mut roots = FnvHashSet::default();
+        roots.insert(*cid);
+        self.0.get_descendants(roots).map(|x| x.into_iter().collect())
+    }
+
+    /// Given a root of a dag, gives all cids which we do not have data for.
+    pub fn get_missing_blocks<C: FromIterator<Cid>>(&mut self, cid: &Cid) -> anyhow::Result<C> {
+        let mut roots = FnvHashSet::default();
+        roots.insert(*cid);
+        self.0.get_missing_blocks(roots)
+    }
+
+    /// list all aliases
+    pub fn aliases<C: FromIterator<(Vec<u8>, Cid)>>(&mut self) -> anyhow::Result<C> {
+        self.0.aliases()
+    }
+
+    /// Put a block. This will only be completed once the transaction is successfully committed
+    pub fn put_block(&mut self, block: libipld::Block<S>, pin: Option<&mut TempPin>) -> anyhow::Result<()> {
+        self.0.put_block(&block, pin)
+    }
+
+    /// Get a block
+    pub fn get_block(&mut self, cid: &Cid) -> anyhow::Result<Option<Vec<u8>>> {
+        self.0.get_block(cid).map(|x| x.map(|x| x.to_vec()))        
+    }
+
+    /// Get the stats for the store.
+    ///
+    /// The stats are kept up to date, so this is fast.
+    pub fn get_store_stats(&mut self) -> anyhow::Result<StoreStats> {
+        Ok(StoreStats::default())
+    }
+
+    /// Commit and consume the transaction. Default is to not commit.
+    pub fn commit(mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
-impl<S> BlockStore<S> {
+#[derive(Debug)]
+pub struct BlockStore<S> {
+    root: RadixTree<DynBlobStore>,
+    temp_pins: Arc<Mutex<BTreeMap<u64, FnvHashSet<Cid>>>>,
+    p: PhantomData<S>,
+}
+
+impl<S> BlockStore<S>
+    where
+        S: StoreParams,
+        Ipld: References<S::Codecs>,
+ {
 
     pub fn incremental_gc(&mut self, _min_blocks: usize, _target_duration: Duration) -> anyhow::Result<bool> {
-        todo!();
+        self.gc()?;
+        Ok(false)
     }
 
     pub fn flush(&mut self) -> anyhow::Result<()> {
-        todo!();
+        Ok(())
     }
 
     pub fn get_store_stats(&self) -> anyhow::Result<StoreStats> {
-        todo!();
+        Ok(StoreStats::default())
     }
 
     pub fn transaction(&mut self) -> Transaction<'_, S> {
-        todo!();
+        Transaction::new(self)
     }
 }
 
@@ -328,7 +433,7 @@ impl<S: StoreParams> BlockStore<S> {
             .collect()
     }
 
-    fn new(store: DynBlobStore) -> anyhow::Result<Self> {
+    pub fn new(store: DynBlobStore) -> anyhow::Result<Self> {
         Ok(Self {
             root: RadixTree::empty(store),
             temp_pins: Default::default(),
@@ -357,6 +462,21 @@ impl<S: StoreParams> BlockStore<S> {
         Ok(())
     }
 
+    pub fn reverse_alias(&mut self, cid: &Cid) -> anyhow::Result<Option<FnvHashSet<Vec<u8>>>> {
+        let aliases: Vec<_> = self.aliases()?;
+        let mut res = FnvHashSet::default();
+        for (name, root) in aliases {
+            if cid == &root {
+                res.insert(name);
+            }
+        }
+        Ok(if res.is_empty() {
+            None
+        } else {
+            Some(res)
+        })
+    }
+
     fn links<E: Extend<Cid>>(&self, id: &Cid, res: &mut E) -> anyhow::Result<()> {
         let key = block_key(id);
         if let Some(blob) = self.root.try_get(&key)? {
@@ -376,7 +496,7 @@ impl<S: StoreParams> BlockStore<S> {
 
     pub fn put_blocks<'a>(
         &mut self,
-        blocks: impl IntoIterator<Item = &'a Block>,
+        blocks: impl IntoIterator<Item = &'a libipld::Block<S>>,
         pin: Option<&mut TempPin>,
     ) -> anyhow::Result<()> {
         let mut cids = Vec::new();
@@ -390,7 +510,7 @@ impl<S: StoreParams> BlockStore<S> {
         Ok(())
     }
 
-    pub fn put_block(&mut self, block: &Block, pin: Option<&mut TempPin>) -> anyhow::Result<()> {
+    pub fn put_block(&mut self, block: &libipld::Block<S>, pin: Option<&mut TempPin>) -> anyhow::Result<()> {
         let block_key = block_key(&block.cid());
         self.root.insert(&block_key, block.data())?;
         if let Some(pin) = pin {
